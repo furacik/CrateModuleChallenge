@@ -3,6 +3,7 @@ package com.work.model;
 import jakarta.persistence.*;
 import lombok.*;
 
+import java.math.BigDecimal;
 import java.time.LocalDate;
 
 @Entity
@@ -15,8 +16,8 @@ public class Installment {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
-    private Double amount;
-    private Double paidAmount;
+    private BigDecimal amount;
+    private BigDecimal paidAmount;
     private LocalDate dueDate;
     private LocalDate paymentDate;
     private Boolean isPaid = false;

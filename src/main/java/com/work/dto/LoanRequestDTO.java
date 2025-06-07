@@ -2,10 +2,12 @@ package com.work.dto;
 
 import lombok.Data;
 
+import java.math.BigDecimal;
+
 @Data
 public class LoanRequestDTO {
     private Long customerId;
-    private Double loanAmount;
-    private Double interestRate;
+    private BigDecimal loanAmount;
+    private BigDecimal interestRate;
     private Integer numberOfInstallment;
 }

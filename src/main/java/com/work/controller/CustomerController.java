@@ -2,25 +2,28 @@ package com.work.controller;
 
 import com.work.model.Customer;
 import com.work.repository.CustomerRepository;
-import lombok.AllArgsConstructor;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 
 @RestController
 @RequestMapping("/api/customers")
-@AllArgsConstructor
 public class CustomerController {
     private final CustomerRepository customerRepository;
+    private final PasswordEncoder passwordEncoder;
+
+    public CustomerController(CustomerRepository customerRepository,
+                              PasswordEncoder passwordEncoder) {
+        this.customerRepository = customerRepository;
+        this.passwordEncoder = passwordEncoder;
+    }
     @PostMapping("/create")
     public ResponseEntity<Customer> createCustomer(@RequestBody Customer customer) {
-        customer.setPassword(new BCryptPasswordEncoder().encode(customer.getPassword()));
+        customer.setPassword(passwordEncoder.encode(customer.getPassword()));
 
         return ResponseEntity.ok(customerRepository.save(customer));
     }

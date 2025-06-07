@@ -7,8 +7,10 @@ import com.work.model.Loan;
 import com.work.repository.CustomerRepository;
 import com.work.repository.InstallmentRepository;
 import com.work.repository.LoanRepository;
+import com.work.utils.ErrorConstants;
 import jakarta.transaction.Transactional;
 import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
@@ -27,31 +29,31 @@ public class LoanService {
     private final LoanRepository loanRepository;
     private final InstallmentRepository installmentRepository;
 
-
+    @PreAuthorize("hasRole('ADMIN') or @loanSecurity.isLoanOwner(#dto.loanId, authentication.name)")
     @Transactional
     public String createLoan(LoanRequestDTO dto) {
-        //installment count control
         List<Integer> allowedInstallments = List.of(6, 9, 12, 24);
+
         if (!allowedInstallments.contains(dto.getNumberOfInstallment())) {
-            return "Taksit sayısı sadece 6, 9, 12, 24 olabilir.";
+            throw new IllegalArgumentException(ErrorConstants.INSTALLMENT_COUNT_ERROR);
         }
 
-        // interest rate control
-        if (dto.getInterestRate() < 0.1 || dto.getInterestRate() > 0.5) {
-            return "Faiz oranı 0.1 ile 0.5 arasında olmalıdır.";
+        if (dto.getInterestRate().compareTo(new BigDecimal("0.1")) < 0 ||
+                dto.getInterestRate().compareTo(new BigDecimal("0.5")) > 0) {
+            throw new IllegalArgumentException(ErrorConstants.INTEREST_RATE_ERROR);
         }
 
         Customer customer = customerRepository.findById(dto.getCustomerId())
-                .orElseThrow(() -> new RuntimeException("Müşteri bulunamadı."));
+                .orElseThrow(() -> new RuntimeException(ErrorConstants.CUSTOMER_NOT_FOUND_ERROR));
 
-        double totalRepayment = dto.getLoanAmount() * (1 + dto.getInterestRate());
+        BigDecimal interestRate = dto.getInterestRate();
+        BigDecimal loanAmount = dto.getLoanAmount();
+        BigDecimal totalRepayment = loanAmount.multiply(BigDecimal.ONE.add(interestRate));
 
-        // Limit control
-        if (customer.getUsedCreditLimit() + totalRepayment > customer.getCreditLimit()) {
-            return "Müşteri limiti yetersiz.";
+        if (customer.getUsedCreditLimit().add(totalRepayment).compareTo(customer.getCreditLimit()) > 0) {
+            throw new IllegalArgumentException(ErrorConstants.CUSTOMER_LIMIT_EXCEEDED_ERROR);
         }
 
-        // create loan
         Loan loan = new Loan();
         loan.setCustomer(customer);
         loan.setLoanAmount(totalRepayment);
@@ -61,43 +63,38 @@ public class LoanService {
 
         loanRepository.save(loan);
 
-        // create installment
         int installmentCount = dto.getNumberOfInstallment();
-        BigDecimal totalAmount = BigDecimal.valueOf(totalRepayment);
-        BigDecimal baseInstallment = totalAmount
-                .divide(BigDecimal.valueOf(installmentCount), 2, RoundingMode.HALF_UP);
+        BigDecimal baseInstallment = totalRepayment.divide(BigDecimal.valueOf(installmentCount), 2, RoundingMode.HALF_UP);
         List<Installment> installments = new ArrayList<>();
 
-        LocalDate dueDate = LocalDate.now().plusMonths(1).withDayOfMonth(1); // first day after other month
+        LocalDate dueDate = LocalDate.now().plusMonths(1).withDayOfMonth(1);
 
-        for (int i = 0; i < dto.getNumberOfInstallment(); i++) {
+        for (int i = 0; i < installmentCount; i++) {
             Installment ins = new Installment();
             ins.setLoan(loan);
-            // added last penny last installment
             if (i == installmentCount - 1) {
                 BigDecimal totalBase = baseInstallment.multiply(BigDecimal.valueOf(installmentCount - 1));
-                BigDecimal lastInstallment = totalAmount.subtract(totalBase);
-                ins.setAmount(lastInstallment.doubleValue());
+                BigDecimal lastInstallment = totalRepayment.subtract(totalBase);
+                ins.setAmount(lastInstallment);
             } else {
-                ins.setAmount(baseInstallment.doubleValue());
+                ins.setAmount(baseInstallment);
             }
             ins.setDueDate(dueDate.plusMonths(i));
             ins.setIsPaid(false);
-            ins.setPaidAmount(0.0);
+            ins.setPaidAmount(BigDecimal.ZERO);
             installments.add(ins);
         }
 
         installmentRepository.saveAll(installments);
 
-        // update customer limit
-        customer.setUsedCreditLimit(customer.getUsedCreditLimit() + totalRepayment);
+        customer.setUsedCreditLimit(customer.getUsedCreditLimit().add(totalRepayment));
         customerRepository.save(customer);
 
-        return "Kredi başarıyla oluşturuldu.";
+        return ErrorConstants.LOAN_CREATE_SUCCESS;
     }
 
 
-
+    @PreAuthorize("hasRole('ADMIN') or @loanSecurity.isLoanOwner(#dto.loanId, authentication.name)")
     public List<LoanResponseDTO> getLoansByCustomerId(Long customerId, Boolean isPaid) {
         List<Loan> loans;
 
@@ -117,6 +114,7 @@ public class LoanService {
             return dto;
         }).collect(Collectors.toList());
     }
+    @PreAuthorize("hasRole('ADMIN') or @loanSecurity.isLoanOwner(#dto.loanId, authentication.name)")
     public List<InstallmentResponseDTO> getInstallments(Long loanId, Boolean isPaid) {
         List<Installment> installments;
 
@@ -137,6 +135,7 @@ public class LoanService {
             return dto;
         }).toList();
     }
+    @PreAuthorize("hasRole('ADMIN') or @loanSecurity.isLoanOwner(#dto.loanId, authentication.name)")
     public PaymentResultDTO payInstallments(LoanPaymentRequestDTO dto) {
         Loan loan = loanRepository.findById(dto.getLoanId())
                 .orElseThrow(() -> new RuntimeException("Kredi bulunamadı."));
@@ -149,44 +148,48 @@ public class LoanService {
         List<Installment> installments = installmentRepository
                 .findByLoanIdOrderByDueDateAsc(loan.getId());
 
-        double remainingAmount = dto.getAmount();
+        BigDecimal remainingAmount = dto.getAmount();
         int paidCount = 0;
-        double totalPaid = 0.0;
+        BigDecimal totalPaid = BigDecimal.ZERO;
 
         for (Installment ins : installments) {
             if (ins.getIsPaid()) continue;
             if (ins.getDueDate().isAfter(maxDueDate)) continue;
 
-            double baseAmount = ins.getAmount();
-            double adjustedAmount = baseAmount;
+            BigDecimal baseAmount = ins.getAmount();
+            BigDecimal adjustedAmount = baseAmount;
 
             long daysBetween = ChronoUnit.DAYS.between(today, ins.getDueDate());
 
             if (daysBetween > 0) {
-                // if pay early, create a discount
-                double discount = baseAmount * 0.001 * daysBetween;
-                adjustedAmount = baseAmount - discount;
+                // Erken ödeme indirimi
+                BigDecimal discountRate = new BigDecimal("0.001");
+                BigDecimal discount = discountRate.multiply(BigDecimal.valueOf(daysBetween)).multiply(baseAmount);
+                adjustedAmount = baseAmount.subtract(discount);
             } else if (daysBetween < 0) {
-                // if pay late , do panishment
+                // Gecikme cezası
                 long lateDays = -daysBetween;
-                double penalty = baseAmount * 0.001 * lateDays;
-                adjustedAmount = baseAmount + penalty;
+                BigDecimal penaltyRate = new BigDecimal("0.001");
+                BigDecimal penalty = penaltyRate.multiply(BigDecimal.valueOf(lateDays)).multiply(baseAmount);
+                adjustedAmount = baseAmount.add(penalty);
             }
-            adjustedAmount = BigDecimal.valueOf(adjustedAmount)
-                    .setScale(2, RoundingMode.HALF_UP)
-                    .doubleValue();
 
-            if (remainingAmount >= adjustedAmount) {
+            // 2 ondalık basamağa yuvarla
+            adjustedAmount = adjustedAmount.setScale(2, RoundingMode.HALF_UP);
+            if (adjustedAmount.compareTo(BigDecimal.ZERO) < 0) {
+                adjustedAmount = BigDecimal.ZERO;
+            }
+            if (remainingAmount.compareTo(adjustedAmount) >= 0) {
                 ins.setIsPaid(true);
                 ins.setPaidAmount(adjustedAmount);
                 ins.setPaymentDate(today);
                 installmentRepository.save(ins);
 
-                remainingAmount -= adjustedAmount;
-                totalPaid += adjustedAmount;
+                remainingAmount = remainingAmount.subtract(adjustedAmount);
+                totalPaid = totalPaid.add(adjustedAmount);
                 paidCount++;
             } else {
-                break; // pay all instalment. dont pass if not enough
+                break; // Taksit ödenemiyorsa dur
             }
         }
 
@@ -199,7 +202,7 @@ public class LoanService {
         loanRepository.save(loan);
 
         // customer usedCreditLimit update
-        customer.setUsedCreditLimit(customer.getUsedCreditLimit() - totalPaid);
+        customer.setUsedCreditLimit(customer.getUsedCreditLimit().subtract(totalPaid));
         customerRepository.save(customer);
 
         PaymentResultDTO result = new PaymentResultDTO();
